@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Stroop 颜色词实验</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+*{box-sizing:border-box;font-family:system-ui, sans-serif;}
+body{text-align:center;margin:40px auto;max-width:700px;font-size:18px;}
+.hidden{display:none !important;}
+#stimulus{font-size:72px;margin:40px 0;height:100px;line-height:100px;}
+.fixation{font-size:48px;color:#333;}
+button{font-size:20px;padding:12px 30px;margin:10px;border-radius:8px;border:1px solid #888;background:#f8f8f8;cursor:pointer;}
+button:hover{background:#eee;}
+#resultBox{text-align:left;margin:30px 0;padding:20px;border:1px solid #ccc;border-radius:8px;}
+canvas{max-width:100%;margin:30px 0;}
+input[type="text"]{font-size:18px;padding:8px;width:300px;}
+</style>
+</head>
+<body>
+
+<!-- 开始页 -->
+<div id="page-start">
+  <h2>Stroop 颜色词实验</h2>
+  <p>请输入被试姓名：</p >
+  <input type="text" id="subjName" placeholder="例如：张三">
+  <br><br>
+  <button onclick="goInstruction()">继续</button>
+  <p style="margin-top:20px">👉 管理员查看结果链接（复制到地址栏尾部）：<code>#adminresult</code></p >
+</div>
+
+<!-- 指导语 -->
+<div id="page-instruction" class="hidden">
+  <h3>实验指导</h3>
+  <p>屏幕会出现一个中文颜色词。<br>
+  请判断：<strong>文字显示的颜色，是否和词语本身的意思一致</strong>。</p >
+  <p>如果一致，点【匹配】；不一致，点【不匹配】。<br>
+  请尽量又快又准作答。</p >
+  <p>一共 10 个试次。</p >
+  <button onclick="startTrial()">开始实验</button>
+</div>
+
+<!-- 实验刺激页 -->
+<div id="page-experiment" class="hidden">
+  <div id="stimulus"></div>
+  <div id="respBtns" class="hidden">
+    <button onclick="recordResponse(true)">匹配</button>
+    <button onclick="recordResponse(false)">不匹配</button>
+  </div>
+</div>
+
+<!-- 被试做完后的结束页 -->
+<div id="page-done" class="hidden">
+  <h3>完成！感谢参与</h3>
+  <p>你的数据已保存。可以关闭页面，或换其他人继续。</p >
+  <p>管理员查看结果：在网址最后添加 <code>#adminresult</code></p >
+</div>
+
+<!-- 管理员汇总结果页 -->
+<div id="page-admin" class="hidden">
+  <h2>📊 管理员汇总结果 #adminresult</h2>
+  <p style="color:#c00;">⚠️ 重要提醒：数据保存在本机浏览器 localStorage。清除缓存、无痕模式、换电脑都会丢失数据！</p >
+  <button onclick="exportCSV()">导出全部 CSV</button>
+  <div id="resultBox"></div>
+  <canvas id="chartCanvas"></canvas>
+</div>
+
+<script>
+// ========== 实验刺激库（10条，含匹配/不匹配） ==========
+const trialPool = [
+  {word:"红", color:"red", match:true},
+  {word:"红", color:"yellow", match:false},
+  {word:"黄", color:"yellow", match:true},
+  {word:"黄", color:"blue", match:false},
+  {word:"蓝", color:"blue", match:true},
+  {word:"蓝", color:"red", match:false},
+  {word:"绿", color:"green", match:true},
+  {word:"绿", color:"blue", match:false},
+  {word:"紫", color:"purple", match:true},
+  {word:"紫", color:"red", match:false},
+];
+
+let state = {
+  subjName:"",
+  trials:[],
+  currentTrialIdx:0,
+  trialStartTs:null
+};
+
+// 洗牌函数
+function shuffle(arr) {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+// 反复洗牌，直到相邻试次的 word 不相同
+function getValidSequence(){
+  let seq;
+  let maxTry = 5000;
+  do{
+    seq = shuffle(trialPool);
+    maxTry--;
+    let ok = true;
+    for(let i=0; i<seq.length-1; i++){
+      if(seq[i].word === seq[i+1].word){
+        ok = false;
+        break;
+      }
+    }
+    if(ok) return seq;
+  }while(maxTry > 0);
+  // 兜底：实在找不到，返回随机，防止卡死（理论上这里很难触发）
+  return shuffle(trialPool);
+}
+
+// 页面切换
+function hideAll(){
+  document.querySelectorAll("div[id^='page-']").forEach(d=>d.classList.add("hidden"));
+}
+function show(id){
+  document.getElementById(id).classList.remove("hidden");
+}
+
+function goInstruction(){
+  const name = document.getElementById("subjName").value.trim();
+  if(!name){alert("请输入姓名");return;}
+  state.subjName = name;
+  hideAll();
+  show("page-instruction");
+}
+
+function startTrial(){
+  // 获取满足【相邻文字不重复】的序列
+  state.trials = getValidSequence();
+  state.currentTrialIdx = 0;
+  hideAll();
+  show("page-experiment");
+  runSingleTrial();
+}
+
+function runSingleTrial(){
+  const stimDiv = document.getElementById("stimulus");
+  const btnDiv = document.getElementById("respBtns");
+  btnDiv.classList.add("hidden");
+  // 注视点 500ms
+  stimDiv.innerHTML = '<span class="fixation">+</span>';
+  setTimeout(()=>{
+    const t = state.trials[state.currentTrialIdx];
+    stimDiv.innerHTML = `<span style="color:${t.color}">${t.word}</span>`;
+    state.trialStartTs = performance.now();
+    btnDiv.classList.remove("hidden");
+  },500);
+}
+
+function recordResponse(userSaidMatch){
+  const rtMs = Math.round(performance.now() - state.trialStartTs);
+  const t = state.trials[state.currentTrialIdx];
+  const correct = (userSaidMatch === t.match);
+
+  const record = {
+    subj: state.subjName,
+    trialNo: state.currentTrialIdx+1,
+    word: t.word,
+    color: t.color,
+    isMatch: t.match,
+    userRespMatch: userSaidMatch,
+    correct: correct,
+    rt: rtMs
+  };
+
+  saveOneRecord(record);
+
+  state.currentTrialIdx++;
+  if(state.currentTrialIdx >= state.trials.length){
+    hideAll();
+    show("page-done");
+  }else{
+    runSingleTrial();
+  }
+}
+
+// localStorage 读写
+function getAllData(){
+  const raw = localStorage.getItem("stroopData");
+  return raw ? JSON.parse(raw) : [];
+}
+function saveOneRecord(rec){
+  const arr = getAllData();
+  arr.push(rec);
+  localStorage.setItem("stroopData", JSON.stringify(arr));
+}
+
+// CSV 导出
+function exportCSV(){
+  const data = getAllData();
+  const header = "subj,trialNo,word,color,isMatch,userRespMatch,correct,rt(ms)\n";
+  const lines = data.map(d=>
+    `${d.subj},${d.trialNo},${d.word},${d.color},${d.isMatch},${d.userRespMatch},${d.correct},${d.rt}`
+  );
+  const blob = new Blob([header + lines.join("\n")], {type:"text/csv;charset=utf-8"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "stroop_result.csv";
+  a.click();
+}
+
+// 管理员汇总 & 绘图
+function renderAdmin(){
+  hideAll();
+  show("page-admin");
+  const data = getAllData();
+  const box = document.getElementById("resultBox");
+  if(data.length === 0){
+    box.innerHTML = "<p>暂无数据</p >";
+    return;
+  }
+  // 按被试分组
+  const bySubj = {};
+  data.forEach(r=>{
+    if(!bySubj[r.subj]) bySubj[r.subj] = [];
+    bySubj[r.subj].push(r);
+  });
+
+  let html = "";
+  let allRT = [];
+  const chartLabels = [];
+  const chartDatasets = [];
+
+  for(const subj of Object.keys(bySubj)){
+    const rows = bySubj[subj];
+    const subjRTs = rows.map(x=>x.rt);
+    const subjAvg = subjRTs.reduce((a,b)=>a+b,0)/subjRTs.length;
+    const acc = rows.filter(x=>x.correct).length / rows.length;
+    allRT.push(...subjRTs);
+    html += `<p><strong>${subj}</strong>｜平均RT: ${subjAvg.toFixed(0)} ms｜正确率: ${(acc*100).toFixed(1)}%<br>
+    各试次RT：${subjRTs.join(" ms, ")} ms
+    </p >`;
+    chartLabels.push(subj);
+    chartDatasets.push(subjAvg);
+  }
+  const grandAvg = allRT.reduce((a,b)=>a+b,0)/allRT.length;
+  html += `<hr><p>✅ <strong>全体总平均反应时：${grandAvg.toFixed(0)} ms</strong></p >`;
+  box.innerHTML = html;
+
+  // Chart.js 柱状图
+  const ctx = document.getElementById("chartCanvas").getContext("2d");
+  new Chart(ctx, {
+    type:"bar",
+    data:{
+      labels: chartLabels,
+      datasets:[{
+        label:"个体平均反应时 (ms)",
+        data: chartDatasets,
+        backgroundColor:"rgba(54, 162, 235, 0.6)"
+      }]
+    },
+    options:{
+      responsive:true,
+      plugins:{title:{display:true, text:"各被试平均反应时"}}
+    }
+  });
+}
+
+// 检测 #adminresult
+if(window.location.hash === "#adminresult"){
+  renderAdmin();
+}
+</script>
+</body>
+</html>
